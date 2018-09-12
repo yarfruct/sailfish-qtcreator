@@ -431,9 +431,41 @@ void MerConnection::refresh()
     vmPollState(Asynchronous);
 }
 
-void MerConnection::connectTo(ConnectOptions options)
+// Returns false when blocking connection request failed or when did not connect
+// immediatelly with non-blocking connection request.
+bool MerConnection::connectTo(ConnectOptions options)
 {
     DBG << "Connect requested";
+
+    if (options & Block) {
+        if (m_state == Connected)
+            return true;
+
+        vmPollState();
+        vmStmScheduleExec();
+        sshStmScheduleExec();
+
+        connectTo(options & ~Block);
+
+        QEventLoop loop;
+        connect(this, &MerConnection::stateChanged, this, [this, &loop] {
+            switch (m_state) {
+            case MerConnection::Disconnected:
+            case MerConnection::Error:
+                loop.exit(EXIT_FAILURE);
+                break;
+
+            case MerConnection::Connected:
+                loop.exit(EXIT_SUCCESS);
+                break;
+
+            default:
+                ;
+            }
+        });
+
+        return loop.exec() == EXIT_SUCCESS;
+    }
 
     if (!m_ui->shouldAsk(Ui::StartVm))
         options &= ~AskStartVm;
@@ -446,14 +478,14 @@ void MerConnection::connectTo(ConnectOptions options)
 
     if (m_lockDownRequested) {
         qWarning() << "MerConnection: connect request for" << m_vmName << "ignored: lockdown active";
-        return;
+        return false;
     } else if (m_state == Connected) {
-        return;
+        return true;
     } else if (m_connectRequested || m_connectLaterRequested) {
-        return;
+        return false;
     } else if (m_disconnectRequested) {
         m_ui->warn(Ui::AlreadyDisconnecting);
-        return;
+        return false;
     }
 
     if (m_state == Error) {
@@ -470,6 +502,8 @@ void MerConnection::connectTo(ConnectOptions options)
     vmPollState(Asynchronous);
     vmStmScheduleExec();
     sshStmScheduleExec();
+
+    return false;
 }
 
 void MerConnection::disconnectFrom()
